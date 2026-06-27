@@ -171,7 +171,7 @@ ROBOT ORIENTATION
 // #define MotorSlide_A 99
 // #define MotorSlide_B 99
 
-// #define srvGripp 99
+#define srvGripp 2
 
 //================================================================================================================================
 
@@ -199,13 +199,13 @@ ROBOT ORIENTATION
 
 // #define limitlifterUp 99
 
-// #define solenoidHolder 99
+#define solenoidHolder 45
 
 // #define solenoidGripper 99
 
 // #define limitlifter 99
 
-#define limitSlideRight 2
+#define limitSlideRight 3
 
 // #define proxy 99
 

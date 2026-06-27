@@ -45,23 +45,28 @@ rcl_subscription_t allbutton;
 rcl_subscription_t allow_lifter_up_sub;
 rcl_subscription_t solenoidGripper_sub;
 rcl_subscription_t gui_start_sub;
+rcl_subscription_t lifter_grid_sub;
+rcl_subscription_t lifter_entry_sub;
+rcl_subscription_t lifter_behind_entry_sub;
+rcl_subscription_t lifter_front_down_sub;
+rcl_subscription_t lifter_behind_down_sub;
 
 rcl_publisher_t odom_publisher;
 rcl_publisher_t imu_publisher;
 rcl_publisher_t checking_input;
-rcl_publisher_t proxy1_publisher;
 rcl_publisher_t limit_publisher;
 rcl_publisher_t limit_slide_publisher;
 rcl_publisher_t tof_publisher;
 rcl_publisher_t lifter_down2_publisher;
 rcl_publisher_t robot_up_publisher;
 rcl_publisher_t infra_publisher;
-rcl_publisher_t grip_done_publisher;
 rcl_publisher_t after_climb_publisher;
 rcl_publisher_t wait_lifter_publisher;
 rcl_publisher_t descend_lifter_up_publisher;
 rcl_publisher_t ir_code_publisher;
 rcl_publisher_t bluePill_status_publisher;
+rcl_publisher_t front_homing_done_pub;
+rcl_publisher_t behind_homing_done_pub;
 
 std_msgs__msg__Int8 button_msg;
 std_msgs__msg__Int8 allbutton_msg;
@@ -82,6 +87,13 @@ std_msgs__msg__Bool descend_lifter_up_msg;
 std_msgs__msg__Bool allow_lifter_up_msg;
 std_msgs__msg__Bool solenoidGripper_msg;
 std_msgs__msg__Bool gui_start_msg;
+std_msgs__msg__Int8 lifter_grid_msg;
+std_msgs__msg__Bool lifter_entry_msg;
+std_msgs__msg__Bool lifter_behind_entry_msg;
+std_msgs__msg__Bool front_homing_done_msg;
+std_msgs__msg__Bool behind_homing_done_msg;
+std_msgs__msg__Bool lifter_front_down_msg;
+std_msgs__msg__Bool lifter_behind_down_msg;
 
 // std_msgs__msg__UInt16 UInt16_msg;
 // std_msgs__msg__UInt8 UInt8_msg;
@@ -108,6 +120,9 @@ void start_grip_sequence();
 void runStartSequence();
 void readBluePillSerial();
 void homingLifterBlocking();
+void handle_front_homing_loop();
+void handle_behind_homing_loop();
+void sendSlideCommand(uint8_t target);
 // void limitLifter(int target);
 // void limitLifter();
 void limitMotor(int target);
@@ -120,6 +135,11 @@ void descend_lifter_up_callback(const void *msgin);
 void allow_lifter_up_callback(const void *msgin);
 void solenoid_grip_callback(const void *msgin);
 void gui_start_callback(const void *msgin);
+void lifter_grid_callback(const void *msgin);
+void lifter_entry_callback(const void *msgin);
+void lifter_behind_entry_callback(const void *msgin);
+void lifter_front_down_callback(const void *msgin);
+void lifter_behind_down_callback(const void *msgin);
 void syncTime();
 void error_loop();
 struct timespec getTime();
@@ -270,6 +290,13 @@ bool startSeqTriggered = false;
 bool startSeqActive = false;
 bool startSeqDone = false;
 
+bool stage2_grid_active = false;
+float stage2_target_front = 2650;
+float stage2_target_behind = 2650;
+
+bool trigger_front_homing = false;
+bool trigger_behind_homing = false;
+
 void setup()
 {
   // Serial1.begin(9600);
@@ -302,30 +329,9 @@ void setup()
   }
 
   // pinMode(proxy1, INPUT);
-  // srv.attach(srvGripp);
+  srv.attach(srvGripp);
 
-  // pinMode(limitLeft, INPUT_PULLUP);
-  // pinMode(limitRight, INPUT_PULLUP);
-  // pinMode(limitlifter, INPUT_PULLUP);
   pinMode(limitSlideRight, INPUT_PULLUP);
-  // pinMode(limitlifterUp, INPUT_PULLUP);
-
-  // pinMode(proxy, INPUT);
-
-  // IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
-
-  // Wire.begin();
-  // Wire.setClock(100000);
-
-  // if (!lox.begin(0x29, false, &Wire))
-  // {
-  //   while (1)
-  //     ;
-  // }
-
-  // lox.configSensor(Adafruit_VL53L0X::VL53L0X_SENSE_HIGH_SPEED);
-
-  // tof_ok = true;
 
   external_encoder1.ppr_total(2048);
   external_encoder2.ppr_total(2048);
@@ -347,21 +353,9 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(enca[6]), readEncoder<6>, RISING);
   attachInterrupt(digitalPinToInterrupt(enca[7]), readEncoder<7>, RISING);
 
-  // pinMode(solenoidHolder, OUTPUT);
-  // digitalWrite(solenoidHolder, LOW);
-
-  // pinMode(solenoidGripper, OUTPUT);
-  // digitalWrite(solenoidGripper, LOW);
   homingLifterBlocking();
 
-  // while (!homed)
-  // while (!homed || !homed_lifter)
-  // {
-  //   limitMotor(0);
-  //   limitLifter();
-  //   srv.write(150);
-  //   delay(10);
-  // }
+  srv.write(150);
 
   pinMode(LED_PIN, OUTPUT);
 }
@@ -427,9 +421,12 @@ void loop()
         limitPublish();
         bluePill_publish();
 
-        // publish_tof();
+        publish_tof();
         // pubInfraredTrans();
       }
+      handle_front_homing_loop();
+      handle_behind_homing_loop();
+
       start_grip_sequence();
       runStartSequence();
       moveBase();
@@ -453,13 +450,17 @@ void loop()
   }
 }
 
+bool slide_done = false;
+bool ir_button_a = false;
+bool ir_button_b = false;
+
 void readBluePillSerial()
 {
 
   static uint8_t tof_status = 0;
   static uint8_t tof_msb = 0;
 
-    while (Serial1.available())
+  while (Serial1.available())
   {
     uint8_t b = Serial1.read();
 
@@ -479,7 +480,7 @@ void readBluePillSerial()
 
     case BP_WAIT_DATA:
     {
-      if (b == 0x08) // ID khusus TOF
+      if (b == 0xFE) // ID khusus TOF
       {
         bluePillRxState = BP_WAIT_TOF_STATUS;
       }
@@ -493,6 +494,20 @@ void readBluePillSerial()
           limitState[id] = value;
         else if (id <= 7)
           proxyState[id - 4] = value;
+        else if (id == 8)
+          slide_done = value;
+        else if (id == 67)
+          ir_button_a = value;
+        else if (id == 68)
+        {
+          ir_button_b = value;
+
+          if (value)
+          {
+            bool_msg.data = true;
+            RCSOFTCHECK(rcl_publish(&infra_publisher, &bool_msg, NULL));
+          }
+        }
 
         bluePillRxState = BP_WAIT_SYNC1;
       }
@@ -609,7 +624,6 @@ void homingLifterBlocking()
 
   homed_lifter = true;
   // homed_lifter = homedFront && homedBehind;
-
 }
 
 float toLinear(double pos, float radius)
@@ -681,115 +695,7 @@ void control_pos_lifter_front(float angle, float pwm)
   pos_prevT2 = pos_currT;
 }
 
-// int homing_target = 0;
-
-// void limitMotor(int target)
-// {
-//   homing_target = target;
-
-//   int limit_A = digitalRead(limitRight);
-//   int limit_B = digitalRead(limitLeft);
-
-//   if (homing_target == 0 && limit_A == 0)
-//   {
-//     setMotor(MotorSlide_A, MotorSlide_B, 0);
-//     homed = true;
-//     return;
-//   }
-//   else if (homing_target == 1 && limit_B == 0)
-//   {
-//     setMotor(MotorSlide_A, MotorSlide_B, 0);
-//     homed = true;
-//     return;
-//   }
-
-//   if (!homed)
-//   {
-//     if (homing_target == 0)
-//     {
-//       setMotor(MotorSlide_A, MotorSlide_B, 255);
-//     }
-//     else if (homing_target == 1)
-//     {
-//       setMotor(MotorSlide_A, MotorSlide_B, -255);
-//     }
-//   }
-// }
-
-// bool limit_triggered = false;
-
-// void limitLifter()
-// {
-//   int limitA = digitalRead(limitlifter);
-
-//   if (limitA == 0)
-//   {
-//     setMotor(MOTOR_LIFT_CW, MOTOR_LIFT_CCW, 0);
-//     homed_lifter = true;
-
-//     if (!limit_triggered)
-//     {
-//       // pos[6] = 0;
-//       limit_triggered = true;
-//     }
-//     return;
-//   }
-//   else
-//   {
-//     limit_triggered = false;
-//     homed_lifter = false;
-//   }
-//   if (!homed_lifter)
-//   {
-//     setMotor(MOTOR_LIFT_CW, MOTOR_LIFT_CCW, 95);
-//   }
-// }
-
-// bool update_tof()
-// {
-//   static uint32_t last_tof_ms = 0;
-//   static uint16_t last_distance = 0;
-//   static bool has_last_distance = false;
-
-//   if (millis() - last_tof_ms < 100)
-//     return false;
-//   last_tof_ms = millis();
-
-//   if (!tof_ok)
-//     return false;
-
-//   VL53L0X_RangingMeasurementData_t measure;
-//   lox.rangingTest(&measure, false);
-
-//   if (measure.RangeStatus != 0)
-//   {
-//     tof_valid = false;
-//     return false;
-//   }
-
-//   uint16_t d = measure.RangeMilliMeter;
-
-//   if (d < TOF_MIN_DIST || d > TOF_MAX_DIST)
-//   {
-//     tof_valid = false;
-//     return false;
-//   }
-
-//   if (has_last_distance && abs((int)d - (int)last_distance) > TOF_JUMP_MAX)
-//   {
-//     return false;
-//   }
-
-//   tof_distance = d;
-//   last_distance = d;
-//   has_last_distance = true;
-//   tof_valid = true;
-
-//   return true;
-// }
-
 bool lifter_locked = false;
-bool was_climb = false;
 bool limit_sent = false;
 bool after_climb_sent = false;
 bool allow_lifter_up_granted = false;
@@ -852,7 +758,7 @@ void moveBase()
     controlled_motor4 = 0.0;
   }
 
-  if(startSeqActive)
+  if (startSeqActive)
   {
     setMotor(cw[0], ccw[0], 0);
     setMotor(cw[1], ccw[1], 0);
@@ -866,7 +772,6 @@ void moveBase()
     setMotor(cw[2], ccw[2], controlled_motor3);
     setMotor(cw[3], ccw[3], controlled_motor4);
   }
-
 
   Kinematic::velocities vel = Kinematics.getVelocities(
       current_rps1,
@@ -924,7 +829,6 @@ void moveBase()
   {
     last_tof = now_mb;
     // proxy_data_msg.data = proxyDetected;
-    RCSOFTCHECK(rcl_publish(&proxy1_publisher, &proxy_data_msg, NULL));
     RCSOFTCHECK(rcl_publish(&checking_input, &checking_input_msg, NULL));
   }
 
@@ -952,46 +856,19 @@ void publishData()
   RCSOFTCHECK(rcl_publish(&odom_publisher, &odom_msg, NULL));
 }
 
-// bool ir_start = false;
-// bool ir_open = false;
+void sendSlideCommand(uint8_t target)
+{
+  Serial1.write(0xBB);
+  Serial1.write(0x44);
+  Serial1.write(target == 0 ? 0x01 : 0x02);
+}
 
-// void pubInfraredTrans()
-// {
-//   if (IrReceiver.decode())
-//   {
-//     uint32_t code = IrReceiver.decodedIRData.decodedRawData;
-
-//     static uint32_t last_code = 0;
-
-//     std_msgs__msg__UInt32 code_msg;
-//     code_msg.data = code;
-//     RCSOFTCHECK(rcl_publish(&ir_code_publisher, &code_msg, NULL));
-
-//     if (code != last_code)
-//     {
-
-//       if (code ==  4111135500 || code == 0x05FA05FA)
-//       // if (code == 0x05FA05FA)
-//       {
-
-//         bool_msg.data = true;
-//         ir_start = true;
-//         grip_step = OPEN_SOL_HOLDER;
-//         RCSOFTCHECK(rcl_publish(&infra_publisher, &bool_msg, NULL));
-//       }
-//       else if (code == 1604345760 || code == 0x30CF50AF)
-//       // else if (code == 0x30CF50AF)
-//       {
-
-//         bool_msg.data = true;
-//         RCSOFTCHECK(rcl_publish(&infra_publisher, &bool_msg, NULL));
-//       }
-
-//       last_code = code;
-//     }
-//     IrReceiver.resume();
-//   }
-// }
+void sendSolenoidCommand(uint8_t activate)
+{
+  Serial1.write(0xBB);
+  Serial1.write(0x44);
+  Serial1.write(activate ? 0x03 : 0x04);
+}
 
 void publish_tof()
 {
@@ -1053,31 +930,37 @@ bool createEntities()
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
       "robot_start"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &wait_lifter_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "wait_lifter"));
+  RCCHECK(rclc_subscription_init_default(
+      &lifter_grid_sub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int8),
+      "lifter_grid_control"));
 
-  // RCCHECK(rclc_subscription_init_default(
-  //     &start_descent_sub,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "/start_descend"));
+  RCCHECK(rclc_subscription_init_default(
+      &lifter_entry_sub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_entry_stage2"));
 
-  // RCCHECK(rclc_subscription_init_default(
-  //     &allow_lifter_up_sub,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "/allow_lifter_up"));
+  RCCHECK(rclc_subscription_init_default(
+      &lifter_behind_entry_sub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_behind_stage2"));
 
-  // RCCHECK(rclc_subscription_init_default(
-  //     &solenoidGripper_sub,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "/solenoid_grip"));
+  RCCHECK(rclc_subscription_init_default(
+      &lifter_front_down_sub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_front_down"));
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 6, &allocator));
+  RCCHECK(rclc_subscription_init_default(
+      &lifter_behind_down_sub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_behind_down"));
+
+  RCCHECK(rclc_executor_init(&executor, &support.context, 9, &allocator));
 
   RCCHECK(rclc_executor_add_subscription(
       &executor,
@@ -1105,6 +988,41 @@ bool createEntities()
       &gui_start_sub,
       &gui_start_msg,
       &gui_start_callback,
+      ON_NEW_DATA));
+
+  RCCHECK(rclc_executor_add_subscription(
+      &executor,
+      &lifter_grid_sub,
+      &lifter_grid_msg,
+      &lifter_grid_callback,
+      ON_NEW_DATA));
+
+  RCCHECK(rclc_executor_add_subscription(
+      &executor,
+      &lifter_entry_sub,
+      &lifter_entry_msg,
+      &lifter_entry_callback,
+      ON_NEW_DATA));
+
+  RCCHECK(rclc_executor_add_subscription(
+      &executor,
+      &lifter_behind_entry_sub,
+      &lifter_behind_entry_msg,
+      &lifter_behind_entry_callback,
+      ON_NEW_DATA));
+
+  RCCHECK(rclc_executor_add_subscription(
+      &executor,
+      &lifter_front_down_sub,
+      &lifter_front_down_msg,
+      &lifter_front_down_callback,
+      ON_NEW_DATA));
+
+  RCCHECK(rclc_executor_add_subscription(
+      &executor,
+      &lifter_behind_down_sub,
+      &lifter_behind_down_msg,
+      &lifter_behind_down_callback,
       ON_NEW_DATA));
 
   // RCCHECK(rclc_executor_add_subscription(
@@ -1143,12 +1061,6 @@ bool createEntities()
       ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
       "imu_extern/data"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &limit_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "limitdata"));
-
   RCCHECK(rclc_publisher_init_default(
       &limit_slide_publisher,
       &node,
@@ -1160,12 +1072,6 @@ bool createEntities()
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
       "robot_up_wp0"));
-
-  // RCCHECK(rclc_publisher_init_default(
-  //     &proxy1_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "/proxydata"));
 
   RCCHECK(rclc_publisher_init_default(
       &tof_publisher,
@@ -1185,23 +1091,29 @@ bool createEntities()
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8MultiArray),
       "bluePill_data"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &infra_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "infraReceive"));
+  RCCHECK(rclc_publisher_init_default(
+      &infra_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "infraReceive"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &lifter_down2_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "lifter_down2"));
+  RCCHECK(rclc_publisher_init_default(
+      &lifter_down2_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_down2"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &grip_done_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "grip_done"));
+  RCCHECK(rclc_publisher_init_default(
+      &front_homing_done_pub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_front_done"));
+
+  RCCHECK(rclc_publisher_init_default(
+      &behind_homing_done_pub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+      "lifter_behind_done"));
 
   // RCCHECK(rclc_publisher_init_default(
   //     &after_climb_publisher,
@@ -1214,12 +1126,6 @@ bool createEntities()
   //     &node,
   //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,msg, Bool),
   //     "/descend_lifter_up_after_down"));
-
-  // RCCHECK(rclc_publisher_init_default(
-  //     &ir_code_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-  //     "ir_raw_code"));
 
   syncTime();
   digitalWrite(LED_PIN, HIGH);
@@ -1234,16 +1140,14 @@ bool destroyEntities()
 
   RCCHECK(rcl_publisher_fini(&odom_publisher, &node));
   RCCHECK(rcl_publisher_fini(&imu_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&infra_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&infra_publisher, &node));
   RCCHECK(rcl_publisher_fini(&checking_input, &node));
   RCCHECK(rcl_publisher_fini(&bluePill_status_publisher, &node));
   // RCCHECK(rcl_publisher_fini(&limit_publisher, &node));
   RCCHECK(rcl_publisher_fini(&limit_slide_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&proxy1_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&grip_done_publisher, &node));
   // RCCHECK(rcl_publisher_fini(&descend_lifter_up_publisher, &node));
   // RCCHECK(rcl_publisher_fini(&after_climb_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&lifter_down2_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&lifter_down2_publisher, &node));
   RCCHECK(rcl_publisher_fini(&tof_publisher, &node));
   RCCHECK(rcl_subscription_fini(&twist_subscriber, &node));
 
@@ -1252,6 +1156,9 @@ bool destroyEntities()
 
   RCCHECK(rcl_subscription_fini(&allbutton, &node));
   RCCHECK(rcl_subscription_fini(&lifter_down_sub, &node));
+  RCCHECK(rcl_subscription_fini(&lifter_grid_sub, &node));
+  RCCHECK(rcl_subscription_fini(&lifter_entry_sub, &node));
+  RCCHECK(rcl_subscription_fini(&lifter_behind_entry_sub, &node));
   // RCCHECK(rcl_subscription_fini(&start_descent_sub, &node));
   // RCCHECK(rcl_subscription_fini(&allow_lifter_up_sub, &node));
   // RCCHECK(rcl_subscription_fini(&solenoidGripper_sub, &node));
@@ -1305,18 +1212,18 @@ void lifter_callback(const void *msgin)
     grip_step = LIFTER_DOWN;
     sensor_ready = false;
     grip_timer = millis();
+    stage2_grid_active = false;
   }
 }
-
 
 void gui_start_callback(const void *msgin)
 {
   const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
 
-  if(!msg->data)
+  if (!msg->data)
     return;
 
-  if(startSeqTriggered)
+  if (startSeqTriggered)
     return;
 
   startSeqTriggered = true;
@@ -1326,26 +1233,25 @@ void gui_start_callback(const void *msgin)
 
 void runStartSequence()
 {
-  if(!startSeqActive)
+  if (!startSeqActive)
     return;
 
   static unsigned long startSeqTimer = 0;
-  if(startSeqTimer == 0)
+  if (startSeqTimer == 0)
     startSeqTimer = millis();
 
+  control_pos_lifter_front(241, 200);
+  control_pos_lifter_behind(205, 200);
 
-  control_pos_lifter_front(  241 , 200);
-  control_pos_lifter_behind( 205  , 200);  
+  bool frontReady = fabs(241 - pos[6]) < 8;
+  bool behindReady = fabs(205 - (-pos[7])) < 8;
+  bool timeout = (millis() - startSeqTimer) >= 2000; // 5 detik
 
-  bool frontReady = fabs( 241 - pos[6]) < 10;
-  bool behindReady = fabs( 205 - (-pos[7])) < 8;
-  bool timeout     = (millis() - startSeqTimer) >= 2000; // 5 detik
-
-  if(frontReady && behindReady || timeout)
+  if (frontReady && behindReady || timeout)
   {
     startSeqActive = false;
     startSeqDone = true;
-    startSeqTimer   = 0; // reset untuk pemakaian berikutnya
+    startSeqTimer = 0; // reset untuk pemakaian berikutnya
 
     wheel1.reset();
     wheel2.reset();
@@ -1357,54 +1263,124 @@ void runStartSequence()
     RCSOFTCHECK(rcl_publish(&robot_up_publisher, &msg, NULL));
   }
 }
-// void solenoid_grip_callback(const void *msgin)
-// {
-//   const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
 
-//   if(msg->data)
-//   {
-//     digitalWrite(solenoidGripper, HIGH);
-//   }
-//   else
-//   {
-//     digitalWrite(solenoidGripper, LOW);
-//   }
-// }
+void lifter_grid_callback(const void *msgin)
+{
+  const std_msgs__msg__Int8 *msg = (const std_msgs__msg__Int8 *)msgin;
+  int8_t col = msg->data;
 
-// void tof_callback(const void *msgin)
-// {
-//   const std_msgs__msg__UInt16 *msg = (const std_msgs__msg__UInt16 *)msgin;
-//   tof_distance = msg->data;
-// }
+  if (col == 0)
+  {
+    stage2_target_front = 3888;
+    stage2_target_behind = 3888;
+  }
+  else if (col == 1)
+  {
+    stage2_target_front = 1899;
+    stage2_target_behind = 1899;
+  }
+  else if (col == 2)
+  {
+    stage2_target_front = 3888;
+    stage2_target_behind = 3888;
+  }
 
-// void start_descent_callback(const void *msgin)
-// {
-//   const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
-//   if (msg->data)
-//   {
-//     descend_command_received = true;
-//   }
-// }
+  stage2_grid_active = true;
+}
 
-// void descend_lifter_up_callback(const void *msgin)
-// {
+void lifter_entry_callback(const void *msgin)
+{
+  const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+  if (msg->data)
+  {
+    trigger_front_homing = true;
+  }
+}
 
-//   const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+void lifter_behind_entry_callback(const void *msgin)
+{
+  const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+  if (msg->data)
+  {
+    trigger_behind_homing = true;
+  }
+}
 
-//   if(msg->data)
-//     was_descend_done = true;
-// }
+void handle_front_homing_loop()
+{
+  if (!trigger_front_homing)
+    return;
 
-// void allow_lifter_up_callback(const void *msgin)
-// {
-//   const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
-//   if(msg->data)
-//   {
-//     allow_lifter_up_granted= true;
-//   }
-// }
+  if (limitState[LIMIT_FRONT_IDX] == false)
+  {
+    setMotor(MOTOR_LIFT_CW_FRONT, MOTOR_LIFT_CCW_FRONT, 0);
+    pos[6] = 0;
+    trigger_front_homing = false;
 
-// bool grip_done_sent = false;
+    lifter_triggered = false;
+    stage2_grid_active = false;
+
+    front_homing_done_msg.data = true;
+    rcl_publish(&front_homing_done_pub, &front_homing_done_msg, NULL);
+  }
+  else
+  {
+    setMotor(MOTOR_LIFT_CW_FRONT, MOTOR_LIFT_CCW_FRONT, -200);
+
+    front_homing_done_msg.data = false;
+    rcl_publish(&front_homing_done_pub, &front_homing_done_msg, NULL);
+  }
+}
+
+void handle_behind_homing_loop()
+{
+  if (!trigger_behind_homing)
+    return;
+
+  if (limitState[LIMIT_BEHIND_IDX] == false) // limit sudah ketekan = SELESAI
+  {
+    setMotor(MOTOR_LIFT_CW_BEHIND, MOTOR_LIFT_CCW_BEHIND, 0);
+    pos[7] = 0;
+    trigger_behind_homing = false;
+
+    lifter_triggered = false;
+    stage2_grid_active = false;
+
+    behind_homing_done_msg.data = true;
+    rcl_publish(&behind_homing_done_pub, &behind_homing_done_msg, NULL);
+  }
+  else // masih proses naik
+  {
+    setMotor(MOTOR_LIFT_CW_BEHIND, MOTOR_LIFT_CCW_BEHIND, -200);
+
+    behind_homing_done_msg.data = false; // ✅ penting: jangan ulangi bug yang sama!
+    rcl_publish(&behind_homing_done_pub, &behind_homing_done_msg, NULL);
+  }
+}
+
+bool front_down_only = false;
+bool behind_down_only = false;
+
+void lifter_front_down_callback(const void *msgin)
+{
+  const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+  if (msg->data)
+  {
+    stage2_target_front = 200; // turun sedikit
+    // stage2_grid_active = true;   // aktifkan control pos
+    front_down_only = true;
+  }
+}
+
+void lifter_behind_down_callback(const void *msgin)
+{
+  const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+  if (msg->data)
+  {
+    stage2_target_behind = 200;
+    behind_down_only = true;
+  }
+}
 
 uint8_t bluePill_data_buff[8];
 
@@ -1432,8 +1408,37 @@ void start_grip_sequence()
   {
     if (lifter_triggered)
     {
-      control_pos_lifter_front(1890, 200);
-      control_pos_lifter_behind( 1890, 245);
+      if (!trigger_front_homing)
+      {
+        control_pos_lifter_front(1890, 200);
+      }
+      if (!trigger_behind_homing)
+      {
+        control_pos_lifter_behind(1890, 245);
+      }
+    }
+    else if (front_down_only || behind_down_only)
+    {
+      if (front_down_only && !trigger_front_homing)
+      {
+        control_pos_lifter_front(200, 200);
+      }
+      if (behind_down_only && !trigger_behind_homing)
+      {
+        control_pos_lifter_behind(200, 245);
+      }
+    }
+    else if (stage2_grid_active)
+    {
+      if (!trigger_front_homing)
+      {
+        control_pos_lifter_front(stage2_target_front, 200);
+      }
+
+      if (!trigger_behind_homing)
+      {
+        control_pos_lifter_behind(stage2_target_behind, 245);
+      }
     }
     return;
   }
@@ -1453,20 +1458,18 @@ void start_grip_sequence()
 
   case LIFTER_DOWN:
 
-    // control_pos(-890, 100);
     control_pos_lifter_front(1890, 200);
     control_pos_lifter_behind(1890, 245);
 
-    // if(millis() - grip_timer >= 1000 && abs(-890 - pos[6]) < 80)
     if (abs(1890 - pos[6]) < 8 && abs(1890 - (-pos[7])) < 8)
     {
-      if(millis() - grip_timer >= 500)
+      if (millis() - grip_timer >= 500)
       {
         grip_timer = millis();
         sensor_ready = false;
         last_proxy = false;
         grip_step = WAIT_SENSOR_READY;
-  
+
         std_msgs__msg__Bool bool_msg;
         bool_msg.data = true;
         RCSOFTCHECK(rcl_publish(&robot_up_publisher, &bool_msg, NULL));
@@ -1476,7 +1479,7 @@ void start_grip_sequence()
     {
       grip_timer = millis(); // reset timer kalau belum stabil
     }
-    
+
     break;
 
   case WAIT_SENSOR_READY:
@@ -1489,163 +1492,220 @@ void start_grip_sequence()
     if (millis() - grip_timer >= 3000)
     {
       grip_timer = millis();
-      // grip_step = WAIT_AFTER_DOWN;
-      grip_step = GRIP_IDLE;
+      grip_step = WAIT_AFTER_DOWN;
       sensor_ready = true;
       proxy_latched = true; // anggap sudah terdeteksi
     }
 
     break;
 
-    // case WAIT_AFTER_DOWN:
+  case WAIT_AFTER_DOWN:
 
-    //   if (millis() - grip_timer >= 1500)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = GRIPPER_CLOSE;
-    //   }
-    //   break;
+    if (millis() - grip_timer >= 1500)
+    {
+      grip_timer = millis();
+      grip_step = GRIPPER_CLOSE;
+    }
+    break;
 
-    // case GRIPPER_CLOSE:
+  case GRIPPER_CLOSE:
 
-    //   srv.write(64);
+    srv.write(64);
 
-    //   if (millis() - grip_timer >= 500)
-    //   {
-    //     grip_timer = millis();
-    //     homed_lifter = false;
-    //     grip_step = LIFTER_UP;
-    //   }
-    //   break;
+    if (millis() - grip_timer >= 500)
+    {
+      grip_timer = millis();
+      homed_lifter = false;
+      grip_step = LIFTER_UP;
+    }
+    break;
 
-    // case LIFTER_UP:
+  case LIFTER_UP:
 
-    //   if (!homed_lifter)
-    //   {
-    //     limitLifter();
-    //   }
-    //   if (homed_lifter)
-    //   {
-    //     grip_step = MOTOR_SLIDE;
-    //     homed = false;
-    //   }
+    control_pos_lifter_front(2650, 200);
+    control_pos_lifter_behind(2650, 245);
 
-    //   break;
+    if (abs(2650 - pos[6]) < 8 && abs(2650 - (-pos[7])) < 8)
+    {
+      if (millis() - grip_timer >= 500)
+      {
+        grip_timer = millis();
+        grip_step = MOTOR_SLIDE;
+      }
+    }
+    else
+    {
+      grip_timer = millis();
+    }
 
-    // case MOTOR_SLIDE:
+    break;
 
-    //   limitMotor(1);
+  case MOTOR_SLIDE:
 
-    //   if (homed)
-    //   {
-    //     grip_step = WAIT_MOTOR_HOMING;
-    //   }
+    static bool cmd_sent = false;
+    if (!cmd_sent)
+    {
+      slide_done = false;
+      sendSlideCommand(1); // kirim perintah ke LIMIT4
+      cmd_sent = true;
+    }
+    if (slide_done)
+    {
+      cmd_sent = false;
+      slide_done = false;
+      grip_timer = millis();
+      grip_step = WAIT_MOTOR_HOMING;
+    }
 
-    //   break;
+    break;
 
-    // case WAIT_MOTOR_HOMING:
+  case WAIT_MOTOR_HOMING:
 
-    //   if (millis() - grip_timer >= 1500)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = SOL_HOLDER;
-    //   }
+    if (millis() - grip_timer >= 1500)
+    {
+      grip_timer = millis();
+      grip_step = SOL_HOLDER;
+    }
 
-    //   break;
+    break;
 
-    // case SOL_HOLDER:
+  case SOL_HOLDER:
 
-    //   digitalWrite(solenoidHolder, HIGH);
+    // digitalWrite(solenoidHolder, HIGH);
 
-    //   if (millis() - grip_timer > 500)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = OPEN_SOL_HOLDER;
-    //   }
+    static bool sol_on_sent = false;
+    if (!sol_on_sent)
+    {
+      sendSolenoidCommand(false); // suruh Bluepill: solenoidHolder HIGH
+      sol_on_sent = true;
+    }
 
-    //   break;
+    if (millis() - grip_timer > 500)
+    {
+      grip_timer = millis();
+      sol_on_sent = false;
+      grip_step = OPEN_SOL_HOLDER;
+    }
 
-    // case OPEN_SOL_HOLDER:
+    break;
 
-    //   if (ir_start)
-    //   {
-    //     digitalWrite(solenoidHolder, LOW);
-    //     ir_start = false;
-    //     solenoid_triggered = true;
-    //     grip_timer = millis();
-    //   }
+  case OPEN_SOL_HOLDER:
 
-    //   if (solenoid_triggered && millis() - grip_timer >= 500)
-    //   {
-    //     solenoid_triggered = false;
-    //     grip_step = WAIT_GRIPPER_OPEN;
-    //   }
+    if (ir_button_a)
+    {
+      // digitalWrite(solenoidHolder, LOW);
+      // ir_start = false;
+      ir_button_a = false;
+      sendSolenoidCommand(true);
+      solenoid_triggered = true;
+      grip_timer = millis();
+    }
 
-    //   break;
+    if (solenoid_triggered && millis() - grip_timer >= 500)
+    {
+      solenoid_triggered = false;
+      grip_step = WAIT_GRIPPER_OPEN;
+    }
 
-    // case WAIT_GRIPPER_OPEN:
+    break;
 
-    //   if (millis() - grip_timer >= 1300)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = GRIPPER_OPEN;
-    //   }
+  case WAIT_GRIPPER_OPEN:
 
-    //   break;
+    if (millis() - grip_timer >= 1300)
+    {
+      grip_timer = millis();
+      grip_step = GRIPPER_OPEN;
+    }
 
-    // case GRIPPER_OPEN:
-    //   srv.write(150);
+    break;
 
-    //   if (millis() - grip_timer >= 500)
-    //   {
-    //     grip_step = WAIT_GRIPPER_CLOSE;
-    //   }
+  case GRIPPER_OPEN:
+    srv.write(150);
 
-    //   break;
+    if (millis() - grip_timer >= 500)
+    {
+      grip_step = WAIT_GRIPPER_CLOSE;
+    }
 
-    // case WAIT_GRIPPER_CLOSE:
+    break;
 
-    //   if (millis() - grip_timer >= 1400)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = GRIPPER_CLOSE_2;
-    //     homed = false;
-    //   }
+  case WAIT_GRIPPER_CLOSE:
 
-    //   break;
+    if (millis() - grip_timer >= 1400)
+    {
+      grip_timer = millis();
+      grip_step = GRIPPER_CLOSE_2;
+      homed = false;
+    }
 
-    // case GRIPPER_CLOSE_2:
+    break;
 
-    //   srv.write(67);
+  case GRIPPER_CLOSE_2:
 
-    //   if (!homed)
-    //   {
-    //     limitMotor(0);
-    //   }
-    //   else
-    //   {
-    //     grip_timer = millis();
-    //     srv.write(150);
-    //     disable_tof_trigger = true;
-    //     proxy_latched = false;
-    //     lifter_triggered = false;
-    //     was_climb = true;
-    //     grip_step = GRIP_IDLE;
-    //     RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
-    //   }
+    srv.write(67);
 
-    //   break;
+    // if (!homed)
+    // {
+    //   limitMotor(0);
+    // }
 
-    // case WAIT_MOTOR_HOMING2:
+    static bool cmd_sent2 = false;
+    if (!cmd_sent2)
+    {
+      slide_done = false;
+      sendSlideCommand(0); // balik ke LIMIT3
+      cmd_sent2 = true;
+    }
+    if (slide_done)
+    {
+      cmd_sent2 = false;
+      slide_done = false;
+      srv.write(150);
+      grip_step = WAIT_MOTOR_HOMING2;
+      grip_timer = millis();
 
-    //   if (millis() - grip_timer >= 1300)
-    //   {
-    //     grip_timer = millis();
-    //     grip_step = LIFTER_DOWN_2;
+      disable_tof_trigger = true;
+      proxy_latched = false;
+      lifter_triggered = false;
+      grip_step = GRIP_IDLE;
 
-    //   }
+      std_msgs__msg__Bool bool_msg;
+      bool_msg.data = true;
+      RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
 
-    //   break;
+      // std_msgs__msg__Bool bool_msg;
+      // bool_msg.data = true;
+      // RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+    }
+
+    break;
+
+  // case WAIT_MOTOR_HOMING2:
+
+  //   control_pos_lifter_front(1890, 200);
+  //   control_pos_lifter_behind(1890, 245);
+
+  //   if (abs(1890 - pos[6]) < 8 && abs(1890 - (-pos[7])) < 8)
+  //   {
+  //     if (millis() - grip_timer >= 500)
+  //     {
+  //       grip_timer = millis();
+
+  //       disable_tof_trigger = true;
+  //       proxy_latched = false;
+  //       lifter_triggered = false;
+  //       grip_step = GRIP_IDLE;
+
+  //       std_msgs__msg__Bool bool_msg;
+  //       bool_msg.data = true;
+  //       RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+  //     }
+  //   }
+  //   else
+  //   {
+  //     grip_timer = millis();
+  //   }
+  //   break;
 
     //   case LIFTER_DOWN_2:
 
