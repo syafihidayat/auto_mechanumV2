@@ -61,11 +61,11 @@
 // #define K_D2 0
 
 #define KP_LIFT 6                                                                         
-#define KI_LIFT 2
+#define KI_LIFT 3
 #define KD_LIFT 0.01
 
-#define KP_LIFT2 6                                                                        
-#define KI_LIFT2 2
+#define KP_LIFT2 7                                                                        
+#define KI_LIFT2 4
 #define KD_LIFT2 0.01
 
 

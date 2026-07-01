@@ -430,9 +430,7 @@ void loop()
       start_grip_sequence();
       runStartSequence();
       moveBase();
-      // update_tof();
 
-      // proxyPublish();
     }
     break;
   case AGENT_DISCONNECTED:
@@ -1143,25 +1141,30 @@ bool destroyEntities()
   RCCHECK(rcl_publisher_fini(&infra_publisher, &node));
   RCCHECK(rcl_publisher_fini(&checking_input, &node));
   RCCHECK(rcl_publisher_fini(&bluePill_status_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&limit_publisher, &node));
   RCCHECK(rcl_publisher_fini(&limit_slide_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&descend_lifter_up_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&after_climb_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&robot_up_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&front_homing_done_pub, &node));
+  RCCHECK(rcl_publisher_fini(&behind_homing_done_pub, &node));
   RCCHECK(rcl_publisher_fini(&lifter_down2_publisher, &node));
   RCCHECK(rcl_publisher_fini(&tof_publisher, &node));
+
+
+
   RCCHECK(rcl_subscription_fini(&twist_subscriber, &node));
-
-  // RCCHECK(rcl_publisher_fini(&wait_lifter_publisher, &node));
-  // RCCHECK(rcl_publisher_fini(&ir_code_publisher, &node));
-
   RCCHECK(rcl_subscription_fini(&allbutton, &node));
   RCCHECK(rcl_subscription_fini(&lifter_down_sub, &node));
   RCCHECK(rcl_subscription_fini(&lifter_grid_sub, &node));
   RCCHECK(rcl_subscription_fini(&lifter_entry_sub, &node));
   RCCHECK(rcl_subscription_fini(&lifter_behind_entry_sub, &node));
-  // RCCHECK(rcl_subscription_fini(&start_descent_sub, &node));
-  // RCCHECK(rcl_subscription_fini(&allow_lifter_up_sub, &node));
-  // RCCHECK(rcl_subscription_fini(&solenoidGripper_sub, &node));
+  RCCHECK(rcl_subscription_fini(&gui_start_sub, &node));
+  RCCHECK(rcl_subscription_fini(&lifter_front_down_sub, &node));
+  RCCHECK(rcl_subscription_fini(&lifter_behind_down_sub, &node));
+
+
+  if (checking_input_msg.data.data != NULL) {
+  free(checking_input_msg.data.data);
+  checking_input_msg.data.data = NULL;
+  }
 
   RCCHECK(rcl_node_fini(&node));
   // RCCHECK(rcl_timer_fini(&control_timer));
@@ -1241,10 +1244,10 @@ void runStartSequence()
     startSeqTimer = millis();
 
   control_pos_lifter_front(241, 200);
-  control_pos_lifter_behind(205, 200);
+  control_pos_lifter_behind(229, 200);
 
   bool frontReady = fabs(241 - pos[6]) < 8;
-  bool behindReady = fabs(205 - (-pos[7])) < 8;
+  bool behindReady = fabs(229 - (-pos[7])) < 8;
   bool timeout = (millis() - startSeqTimer) >= 2000; // 5 detik
 
   if (frontReady && behindReady || timeout)
@@ -1501,7 +1504,7 @@ void start_grip_sequence()
 
   case WAIT_AFTER_DOWN:
 
-    if (millis() - grip_timer >= 1500)
+    if (millis() - grip_timer >= 500)
     {
       grip_timer = millis();
       grip_step = GRIPPER_CLOSE;
@@ -1510,9 +1513,9 @@ void start_grip_sequence()
 
   case GRIPPER_CLOSE:
 
-    srv.write(64);
+    srv.write(62);
 
-    if (millis() - grip_timer >= 500)
+    if (millis() - grip_timer >= 300)
     {
       grip_timer = millis();
       homed_lifter = false;
@@ -1527,7 +1530,7 @@ void start_grip_sequence()
 
     if (abs(2650 - pos[6]) < 8 && abs(2650 - (-pos[7])) < 8)
     {
-      if (millis() - grip_timer >= 500)
+      if (millis() - grip_timer >= 300)
       {
         grip_timer = millis();
         grip_step = MOTOR_SLIDE;
@@ -1561,7 +1564,7 @@ void start_grip_sequence()
 
   case WAIT_MOTOR_HOMING:
 
-    if (millis() - grip_timer >= 1500)
+    if (millis() - grip_timer >= 70)
     {
       grip_timer = millis();
       grip_step = SOL_HOLDER;
@@ -1571,8 +1574,6 @@ void start_grip_sequence()
 
   case SOL_HOLDER:
 
-    // digitalWrite(solenoidHolder, HIGH);
-
     static bool sol_on_sent = false;
     if (!sol_on_sent)
     {
@@ -1580,7 +1581,7 @@ void start_grip_sequence()
       sol_on_sent = true;
     }
 
-    if (millis() - grip_timer > 500)
+    if (millis() - grip_timer > 300)
     {
       grip_timer = millis();
       sol_on_sent = false;
@@ -1601,7 +1602,7 @@ void start_grip_sequence()
       grip_timer = millis();
     }
 
-    if (solenoid_triggered && millis() - grip_timer >= 500)
+    if (solenoid_triggered && millis() - grip_timer >= 300)
     {
       solenoid_triggered = false;
       grip_step = WAIT_GRIPPER_OPEN;
@@ -1611,7 +1612,7 @@ void start_grip_sequence()
 
   case WAIT_GRIPPER_OPEN:
 
-    if (millis() - grip_timer >= 1300)
+    if (millis() - grip_timer >= 500)
     {
       grip_timer = millis();
       grip_step = GRIPPER_OPEN;
@@ -1642,12 +1643,7 @@ void start_grip_sequence()
 
   case GRIPPER_CLOSE_2:
 
-    srv.write(67);
-
-    // if (!homed)
-    // {
-    //   limitMotor(0);
-    // }
+    srv.write(62);
 
     static bool cmd_sent2 = false;
     if (!cmd_sent2)
@@ -1664,48 +1660,46 @@ void start_grip_sequence()
       grip_step = WAIT_MOTOR_HOMING2;
       grip_timer = millis();
 
-      disable_tof_trigger = true;
-      proxy_latched = false;
-      lifter_triggered = false;
-      grip_step = GRIP_IDLE;
-
-      std_msgs__msg__Bool bool_msg;
-      bool_msg.data = true;
-      RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+      // disable_tof_trigger = true;
+      // proxy_latched = false;
+      // lifter_triggered = false;
+      // grip_step = GRIP_IDLE;
 
       // std_msgs__msg__Bool bool_msg;
       // bool_msg.data = true;
       // RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+
     }
 
     break;
 
-  // case WAIT_MOTOR_HOMING2:
+  case WAIT_MOTOR_HOMING2:
 
-  //   control_pos_lifter_front(1890, 200);
-  //   control_pos_lifter_behind(1890, 245);
+    control_pos_lifter_front(1890, 200);
+    control_pos_lifter_behind(1890, 250);
 
-  //   if (abs(1890 - pos[6]) < 8 && abs(1890 - (-pos[7])) < 8)
-  //   {
-  //     if (millis() - grip_timer >= 500)
-  //     {
-  //       grip_timer = millis();
+    if (abs(1890 - pos[6]) < 15 && abs(1890 - (-pos[7])) < 15)
+    {
+      // if (millis() - grip_timer >= 100)
+      // {
+      grip_timer = millis();
 
-  //       disable_tof_trigger = true;
-  //       proxy_latched = false;
-  //       lifter_triggered = false;
-  //       grip_step = GRIP_IDLE;
+      disable_tof_trigger = false;
+      proxy_latched = false;
+      lifter_triggered = false;
+      grip_step = WAIT_SENSOR_READY;
+      // grip_step = GRIP_IDLE;
 
-  //       std_msgs__msg__Bool bool_msg;
-  //       bool_msg.data = true;
-  //       RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
-  //     }
-  //   }
-  //   else
-  //   {
-  //     grip_timer = millis();
-  //   }
-  //   break;
+      std_msgs__msg__Bool bool_msg;
+      bool_msg.data = true;
+      RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+      // }
+    }
+    // else
+    // {
+    //   grip_timer = millis();
+    // }
+    break;
 
     //   case LIFTER_DOWN_2:
 
