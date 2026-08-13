@@ -60,8 +60,8 @@
 // #define K_I2 255.707317073 // 120
 // #define K_D2 0
 
-#define KP_LIFT 6                                                                         
-#define KI_LIFT 3
+#define KP_LIFT 7                                                                         
+#define KI_LIFT 4
 #define KD_LIFT 0.01
 
 #define KP_LIFT2 7                                                                        

@@ -53,7 +53,7 @@ rcl_subscription_t lifter_behind_down_sub;
 
 rcl_publisher_t odom_publisher;
 rcl_publisher_t imu_publisher;
-rcl_publisher_t checking_input;
+// rcl_publisher_t checking_input;
 rcl_publisher_t limit_publisher;
 rcl_publisher_t limit_slide_publisher;
 rcl_publisher_t tof_publisher;
@@ -70,7 +70,7 @@ rcl_publisher_t behind_homing_done_pub;
 
 std_msgs__msg__Int8 button_msg;
 std_msgs__msg__Int8 allbutton_msg;
-std_msgs__msg__Float32MultiArray checking_input_msg;
+// std_msgs__msg__Float32MultiArray checking_input_msg;
 std_msgs__msg__UInt8MultiArray bluePill_status_msg;
 
 nav_msgs__msg__Odometry odom_msg;
@@ -191,6 +191,15 @@ unsigned long last_publishData = 0;
 unsigned long last_tof = 0;
 unsigned long last_receiver = 0;
 
+enum RX_STATE
+{
+    WAIT_AA,
+    WAIT_55,
+    WAIT_CMD
+};
+
+RX_STATE rxState = WAIT_AA;
+
 enum states
 {
   WAITING_AGENT,
@@ -246,6 +255,7 @@ unsigned long grip_timer = 0;
 GripStep grip_step = GRIP_IDLE;
 volatile bool proxy_detected = true;
 static bool sensor_ready = false;
+uint8_t bluePill_data_buff[8];
 
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire1);
 // Adafruit_VL53L0X lox = Adafruit_VL53L0X();
@@ -297,12 +307,15 @@ float stage2_target_behind = 2650;
 bool trigger_front_homing = false;
 bool trigger_behind_homing = false;
 
+bool husky_detected = false;
+
 void setup()
 {
   // Serial1.begin(9600);
-  Serial1.begin(115200);
+  Serial1.begin(57600);
+  // Serial1.begin(115200);
 
-  // Serial.begin(115200);
+  // Serial.begizn(115200);
 
   set_microros_serial_transports(Serial);
 
@@ -355,6 +368,7 @@ void setup()
 
   homingLifterBlocking();
 
+  // srv.write(61);
   srv.write(150);
 
   pinMode(LED_PIN, OUTPUT);
@@ -391,22 +405,6 @@ void loop()
     {
       RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
-      // if (grip_step == WAIT_SENSOR_READY && !disable_tof_trigger)
-      // {
-
-      //   bool tof_detected = (tof_distance < TOF_MAX_DIST && tof_distance > TOF_MIN_DIST);
-      //   if (tof_detected && !last_proxy && !proxy_latched)
-
-      //   {
-      //     grip_step = WAIT_AFTER_DOWN;
-      //     grip_timer = millis();
-      //     sensor_ready = true;
-      //     proxy_latched = true;
-      //   }
-
-      //   last_proxy = tof_detected;
-      // }
-
       unsigned long now = millis();
 
       if (now - last_publishData >= 20)
@@ -422,15 +420,13 @@ void loop()
         bluePill_publish();
 
         publish_tof();
-        // pubInfraredTrans();
       }
       handle_front_homing_loop();
       handle_behind_homing_loop();
-
       start_grip_sequence();
       runStartSequence();
-      moveBase();
 
+      moveBase();
     }
     break;
   case AGENT_DISCONNECTED:
@@ -461,6 +457,39 @@ void readBluePillSerial()
   while (Serial1.available())
   {
     uint8_t b = Serial1.read();
+
+    // switch(rxState)
+    // {
+    //   case WAIT_AA:
+
+    //       if(b == 0xAA)
+    //           rxState = WAIT_55;
+
+    //       break;
+
+    //   case WAIT_55:
+
+    //       if(b == 0x55)
+    //           rxState = WAIT_CMD;
+    //       else
+    //           rxState = WAIT_AA;
+
+    //       break;
+
+    //   case WAIT_CMD:
+
+    //       if(b == 0x99)
+    //       {
+    //           digitalWrite(LED_BUILTIN, HIGH);
+    //           delay(100);
+    //           digitalWrite(LED_BUILTIN, LOW);
+
+    //           Serial.println("Packet diterima!");
+    //       }
+
+    //       rxState = WAIT_AA;
+    //       break;
+    // }
 
     switch (bluePillRxState)
     {
@@ -505,6 +534,12 @@ void readBluePillSerial()
             bool_msg.data = true;
             RCSOFTCHECK(rcl_publish(&infra_publisher, &bool_msg, NULL));
           }
+        }
+        else if (id == 9)
+        {
+          if(value)
+
+            husky_detected = true;
         }
 
         bluePillRxState = BP_WAIT_SYNC1;
@@ -706,9 +741,19 @@ bool descend_done_sent = false;
 void moveBase()
 {
 
-  sensors_event_t event, angVelocityData;
-  bno.getEvent(&event, Adafruit_BNO055::VECTOR_EULER);
-  bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+  // sensors_event_t event, angVelocityData;
+  // bno.getEvent(&event, Adafruit_BNO055::VECTOR_EULER);
+  // bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+  static sensors_event_t event, angVelocityData;
+  static unsigned long last_imu_read = 0;
+  unsigned long now_imu = millis();
+  if (now_imu - last_imu_read >= 10)
+  {
+    last_imu_read = now_imu;
+    bno.getEvent(&event, Adafruit_BNO055::VECTOR_EULER);
+    bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+  }
 
   unsigned long currT = micros();
   float deltaT = ((float)(currT - prevT)) / 1.0e6;
@@ -813,27 +858,26 @@ void moveBase()
 
   prevT = currT;
 
-  checking_input_msg.data.data[0] = current_rps1;
-  checking_input_msg.data.data[1] = current_rps2;
-  checking_input_msg.data.data[2] = current_rps3;
-  checking_input_msg.data.data[3] = current_rps4;
-  checking_input_msg.data.data[4] = event.orientation.x;
-  checking_input_msg.data.data[5] = event.orientation.y;
-  checking_input_msg.data.data[6] = pos[6];
-  checking_input_msg.data.data[7] = pos[7];
+  // checking_input_msg.data.data[0] = current_rps1;
+  // checking_input_msg.data.data[1] = current_rps2;
+  // checking_input_msg.data.data[2] = current_rps3;
+  // checking_input_msg.data.data[3] = current_rps4;
+  // checking_input_msg.data.data[4] = event.orientation.x;
+  // checking_input_msg.data.data[5] = event.orientation.y;
+  // checking_input_msg.data.data[6] = pos[6];
+  // checking_input_msg.data.data[7] = pos[7];
 
   unsigned long now_mb = millis();
   if (now_mb - last_tof >= 50)
   {
     last_tof = now_mb;
-    // proxy_data_msg.data = proxyDetected;
-    RCSOFTCHECK(rcl_publish(&checking_input, &checking_input_msg, NULL));
+    // RCSOFTCHECK(rcl_publish(&checking_input, &checking_input_msg, NULL));
   }
 
   // RCSOFTCHECK(rcl_publish(&checking_input, &checking_input_msg, NULL));
 
-  uint8_t system, gyro, accel, mag = 0;
-  bno.getCalibration(&system, &gyro, &accel, &mag);
+  // uint8_t system, gyro, accel, mag = 0;
+  // bno.getCalibration(&system, &gyro, &accel, &mag);
 }
 
 void publishData()
@@ -909,12 +953,6 @@ bool createEntities()
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int8),
       "allbutton"));
-
-  // RCCHECK(rclc_subscription_init_default(
-  //     &proxy_data_sub,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "/true_sensor_proxy"));
 
   RCCHECK(rclc_subscription_init_default(
       &lifter_down_sub,
@@ -1023,35 +1061,14 @@ bool createEntities()
       &lifter_behind_down_callback,
       ON_NEW_DATA));
 
-  // RCCHECK(rclc_executor_add_subscription(
-  //     &executor,
-  //     &start_descent_sub,
-  //     &start_descent_msg,
-  //     &start_descent_callback,
-  // ON_NEW_DATA));
-
-  // RCCHECK(rclc_executor_add_subscription(
-  //     &executor,
-  //     &allow_lifter_up_sub,
-  //     &allow_lifter_up_msg,
-  //     &allow_lifter_up_callback,
-  //     ON_NEW_DATA));
-
-  // RCCHECK(rclc_executor_add_subscription(
-  //     &executor,
-  //     &solenoidGripper_sub,
-  //     &solenoidGripper_msg,
-  //     &solenoid_grip_callback,
-  //     ON_NEW_DATA));
-
-  RCCHECK(rclc_publisher_init_default(
-      &checking_input,
-      &node,
-      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-      "checking_input"));
-  checking_input_msg.data.data = (float *)malloc(8 * sizeof(float)); // Sesuaikan jumlah elemen
-  checking_input_msg.data.size = 8;
-  checking_input_msg.data.capacity = 8;
+  // RCCHECK(rclc_publisher_init_default(
+  //     &checking_input,
+  //     &node,
+  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+  //     "checking_input"));
+  // checking_input_msg.data.data = (float *)malloc(8 * sizeof(float)); // Sesuaikan jumlah elemen
+  // checking_input_msg.data.size = 8;
+  // checking_input_msg.data.capacity = 8;
 
   RCCHECK(rclc_publisher_init_default(
       &imu_publisher,
@@ -1089,6 +1106,17 @@ bool createEntities()
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8MultiArray),
       "bluePill_data"));
 
+  std_msgs__msg__UInt8MultiArray__init(&bluePill_status_msg);
+
+  bluePill_status_msg.layout.dim.data = NULL;
+  bluePill_status_msg.layout.dim.size = 0;
+  bluePill_status_msg.layout.dim.capacity = 0;
+  bluePill_status_msg.layout.data_offset = 0;
+
+  bluePill_status_msg.data.data = bluePill_data_buff;
+  bluePill_status_msg.data.size = 8;
+  bluePill_status_msg.data.capacity = 8;
+
   RCCHECK(rclc_publisher_init_default(
       &infra_publisher,
       &node,
@@ -1113,18 +1141,6 @@ bool createEntities()
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
       "lifter_behind_done"));
 
-  // RCCHECK(rclc_publisher_init_default(
-  //     &after_climb_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-  //     "afterClimb"));
-
-  // RCCHECK(rclc_publisher_init_default(
-  //     &descend_lifter_up_publisher,
-  //     &node,
-  //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,msg, Bool),
-  //     "/descend_lifter_up_after_down"));
-
   syncTime();
   digitalWrite(LED_PIN, HIGH);
   return true;
@@ -1139,7 +1155,7 @@ bool destroyEntities()
   RCCHECK(rcl_publisher_fini(&odom_publisher, &node));
   RCCHECK(rcl_publisher_fini(&imu_publisher, &node));
   RCCHECK(rcl_publisher_fini(&infra_publisher, &node));
-  RCCHECK(rcl_publisher_fini(&checking_input, &node));
+  // RCCHECK(rcl_publisher_fini(&checking_input, &node));
   RCCHECK(rcl_publisher_fini(&bluePill_status_publisher, &node));
   RCCHECK(rcl_publisher_fini(&limit_slide_publisher, &node));
   RCCHECK(rcl_publisher_fini(&robot_up_publisher, &node));
@@ -1147,8 +1163,6 @@ bool destroyEntities()
   RCCHECK(rcl_publisher_fini(&behind_homing_done_pub, &node));
   RCCHECK(rcl_publisher_fini(&lifter_down2_publisher, &node));
   RCCHECK(rcl_publisher_fini(&tof_publisher, &node));
-
-
 
   RCCHECK(rcl_subscription_fini(&twist_subscriber, &node));
   RCCHECK(rcl_subscription_fini(&allbutton, &node));
@@ -1160,11 +1174,10 @@ bool destroyEntities()
   RCCHECK(rcl_subscription_fini(&lifter_front_down_sub, &node));
   RCCHECK(rcl_subscription_fini(&lifter_behind_down_sub, &node));
 
-
-  if (checking_input_msg.data.data != NULL) {
-  free(checking_input_msg.data.data);
-  checking_input_msg.data.data = NULL;
-  }
+  // if (checking_input_msg.data.data != NULL) {
+  // free(checking_input_msg.data.data);
+  // checking_input_msg.data.data = NULL;
+  // }
 
   RCCHECK(rcl_node_fini(&node));
   // RCCHECK(rcl_timer_fini(&control_timer));
@@ -1242,6 +1255,8 @@ void runStartSequence()
   static unsigned long startSeqTimer = 0;
   if (startSeqTimer == 0)
     startSeqTimer = millis();
+
+  srv.write(150);
 
   control_pos_lifter_front(241, 200);
   control_pos_lifter_behind(229, 200);
@@ -1385,21 +1400,36 @@ void lifter_behind_down_callback(const void *msgin)
   }
 }
 
-uint8_t bluePill_data_buff[8];
+// uint8_t bluePill_data_buff[8];
 
 void bluePill_publish()
 {
   for (int i = 0; i < 4; i++)
     bluePill_data_buff[i] = limitState[i];
+
   for (int i = 0; i < 4; i++)
     bluePill_data_buff[i + 4] = proxyState[i];
 
-  bluePill_status_msg.data.data = bluePill_data_buff;
-  bluePill_status_msg.data.size = 8;
-  bluePill_status_msg.data.capacity = 8;
-
   RCSOFTCHECK(rcl_publish(&bluePill_status_publisher, &bluePill_status_msg, NULL));
 }
+
+// void bluePill_publish()
+// {
+//   for (int i = 0; i < 4; i++)
+//     bluePill_data_buff[i] = limitState[i];
+//   for (int i = 0; i < 4; i++)
+//     bluePill_data_buff[i + 4] = proxyState[i];
+
+//   bluePill_status_msg.data.data = bluePill_data_buff;
+//   bluePill_status_msg.data.size = 8;
+//   bluePill_status_msg.data.capacity = 8;
+
+//   RCSOFTCHECK(rcl_publish(&bluePill_status_publisher, &bluePill_status_msg, NULL));
+// }
+
+#define TOF_GRIP_THRESHOLD 74       // mm, samain sama TOF_THRESHOLD di ROS node — sesuaikan kalau perlu
+#define TOF_DEBOUNCE_MS 150         // object harus konsisten terdeteksi selama ini baru dianggap valid
+#define WAIT_SENSOR_TIMEOUT_MS 3500 // safety fallback kalau TOF gak pernah valid
 
 void start_grip_sequence()
 {
@@ -1413,18 +1443,18 @@ void start_grip_sequence()
     {
       if (!trigger_front_homing)
       {
-        control_pos_lifter_front(1890, 200);
+        control_pos_lifter_front(1960, 235);
       }
       if (!trigger_behind_homing)
       {
-        control_pos_lifter_behind(1890, 245);
+        control_pos_lifter_behind(1960, 245);
       }
     }
     else if (front_down_only || behind_down_only)
     {
       if (front_down_only && !trigger_front_homing)
       {
-        control_pos_lifter_front(200, 200);
+        control_pos_lifter_front(200, 235);
       }
       if (behind_down_only && !trigger_behind_homing)
       {
@@ -1435,7 +1465,7 @@ void start_grip_sequence()
     {
       if (!trigger_front_homing)
       {
-        control_pos_lifter_front(stage2_target_front, 200);
+        control_pos_lifter_front(stage2_target_front, 235);
       }
 
       if (!trigger_behind_homing)
@@ -1459,19 +1489,57 @@ void start_grip_sequence()
     }
     break;
 
+    // case LIFTER_DOWN:
+
+    //   control_pos_lifter_front(1960, 200);
+    //   control_pos_lifter_behind(1960, 245);
+
+    //   if (abs(1960 - pos[6]) < 8 && abs(1960 - (-pos[7])) < 8)
+    //   {
+    //     if (millis() - grip_timer >= 300)
+    //     {
+    //       grip_timer = millis();
+    //       sensor_ready = false;
+    //       last_proxy = false;
+    //       grip_step = WAIT_SENSOR_READY;
+
+    //       std_msgs__msg__Bool bool_msg;
+    //       bool_msg.data = true;
+    //       RCSOFTCHECK(rcl_publish(&robot_up_publisher, &bool_msg, NULL));
+    //     }
+    //   }
+    //   else
+    //   {
+    //     grip_timer = millis(); // reset timer kalau belum stabil
+    //   }
+
+    //   break;
+
   case LIFTER_DOWN:
+  {
+    static unsigned long stable_since = 0;
+    static bool was_in_tol = false;
 
-    control_pos_lifter_front(1890, 200);
-    control_pos_lifter_behind(1890, 245);
+    control_pos_lifter_front(1960, 235);
+    control_pos_lifter_behind(1960, 245);
 
-    if (abs(1890 - pos[6]) < 8 && abs(1890 - (-pos[7])) < 8)
+    bool in_tol = abs(1960 - pos[6]) < 8 && abs(1960 - (-pos[7])) < 8;
+
+    if (in_tol)
     {
-      if (millis() - grip_timer >= 500)
+      if (!was_in_tol)
+      {
+        stable_since = millis(); // baru pertama kali masuk toleransi
+        was_in_tol = true;
+      }
+
+      if (millis() - stable_since >= 200)
       {
         grip_timer = millis();
         sensor_ready = false;
         last_proxy = false;
         grip_step = WAIT_SENSOR_READY;
+        was_in_tol = false; // reset buat siklus berikutnya
 
         std_msgs__msg__Bool bool_msg;
         bool_msg.data = true;
@@ -1480,31 +1548,79 @@ void start_grip_sequence()
     }
     else
     {
-      grip_timer = millis(); // reset timer kalau belum stabil
+      // kasih toleransi kecil biar jitter satu-dua tick gak langsung reset total
+      if (millis() - stable_since > 100) // baru dianggap "keluar beneran" kalau udah >100ms
+      {
+        was_in_tol = false;
+      }
     }
 
     break;
+  }
+
+    // case WAIT_SENSOR_READY:
+
+    //   control_pos_lifter_front(1960, 200);
+    //   control_pos_lifter_behind(1960, 245);
+
+    //   // if (millis() - grip_timer >= 5000)
+    //   if (millis() - grip_timer >= 3000)
+    //   {
+    //     grip_timer = millis();
+    //     grip_step = WAIT_AFTER_DOWN;
+    //     sensor_ready = true;
+    //     proxy_latched = true; // anggap sudah terdeteksi
+    //   }
+
+    //   break;
 
   case WAIT_SENSOR_READY:
-
+  {
     // control_pos(-890, 100);
 
-    control_pos_lifter_front(1890, 200);
-    control_pos_lifter_behind(1890, 245);
+    control_pos_lifter_front(1960, 235);
+    control_pos_lifter_behind(1960, 245);
 
-    if (millis() - grip_timer >= 3000)
+    // #define TOF_GRIP_THRESHOLD 74       // mm, samain sama TOF_THRESHOLD di ROS node — sesuaikan kalau perlu
+    // #define TOF_DEBOUNCE_MS 150         // object harus konsisten terdeteksi selama ini baru dianggap valid
+    // #define WAIT_SENSOR_TIMEOUT_MS 5000 // safety fallback kalau TOF gak pernah valid
+
+    static unsigned long tof_detect_since = 0;
+    static bool tof_was_detected = false;
+
+    bool object_detected = tof_valid && tof_distance > 0 && tof_distance < TOF_GRIP_THRESHOLD;
+
+    if (object_detected)
+    {
+      if (!tof_was_detected)
+      {
+        tof_detect_since = millis();
+        tof_was_detected = true;
+      }
+    }
+    else
+    {
+      tof_was_detected = false;
+    }
+
+    bool tof_confirmed = tof_was_detected && (millis() - tof_detect_since >= TOF_DEBOUNCE_MS);
+    bool timeout_fallback = (millis() - grip_timer >= WAIT_SENSOR_TIMEOUT_MS);
+
+    if (tof_confirmed || timeout_fallback)
     {
       grip_timer = millis();
       grip_step = WAIT_AFTER_DOWN;
       sensor_ready = true;
-      proxy_latched = true; // anggap sudah terdeteksi
+      proxy_latched = true;
+      tof_was_detected = false; // reset buat siklus berikutnya
     }
 
     break;
+  }
 
   case WAIT_AFTER_DOWN:
 
-    if (millis() - grip_timer >= 500)
+    if (millis() - grip_timer >= 300)
     {
       grip_timer = millis();
       grip_step = GRIPPER_CLOSE;
@@ -1513,9 +1629,9 @@ void start_grip_sequence()
 
   case GRIPPER_CLOSE:
 
-    srv.write(62);
+    srv.write(61);
 
-    if (millis() - grip_timer >= 300)
+    if (millis() - grip_timer >= 200)
     {
       grip_timer = millis();
       homed_lifter = false;
@@ -1523,17 +1639,72 @@ void start_grip_sequence()
     }
     break;
 
+    // case LIFTER_UP:
+
+    //   control_pos_lifter_front(2700, 200);
+    //   control_pos_lifter_behind(2700, 245);
+
+    //   if (abs(2700 - pos[6]) < 8 && abs(2700 - (-pos[7])) < 8)
+    //   {
+    //     if (millis() - grip_timer >= 250)
+    //     {
+    //       grip_timer = millis();
+    //       grip_step = MOTOR_SLIDE;
+    //     }
+    //   }
+    //   else
+    //   {
+    //     grip_timer = millis();
+    //   }
+
+    //   break;
+
   case LIFTER_UP:
+  {
+    static float last_pos_front = 0;
+    static float last_pos_behind = 0;
+    static unsigned long stall_timer_front = 0;
+    static unsigned long stall_timer_behind = 0;
+    static bool stall_init = true;
 
-    control_pos_lifter_front(2650, 200);
-    control_pos_lifter_behind(2650, 245);
+    control_pos_lifter_front(2870, 235);
+    control_pos_lifter_behind(2870, 245);
 
-    if (abs(2650 - pos[6]) < 8 && abs(2650 - (-pos[7])) < 8)
+    if (stall_init)
     {
-      if (millis() - grip_timer >= 300)
+      last_pos_front = pos[6];
+      last_pos_behind = -pos[7];
+      stall_timer_front = millis();
+      stall_timer_behind = millis();
+      stall_init = false;
+    }
+
+    bool frontDone = abs(2870 - pos[6]) < 8;
+    bool behindDone = abs(2870 - (-pos[7])) < 8;
+
+    // reset timer stall kalau posisi masih berubah cukup jauh
+    if (abs(pos[6] - last_pos_front) > 2)
+    {
+      last_pos_front = pos[6];
+      stall_timer_front = millis();
+    }
+    if (abs((-pos[7]) - last_pos_behind) > 2)
+    {
+      last_pos_behind = -pos[7];
+      stall_timer_behind = millis();
+    }
+
+    // kalau posisi gak berubah > 300ms, anggap motor sudah mentok/stall
+    bool frontStalled = (millis() - stall_timer_front) > 300;
+    bool behindStalled = (millis() - stall_timer_behind) > 300;
+
+    if ((frontDone || frontStalled) && (behindDone || behindStalled))
+    {
+      if (millis() - grip_timer >= 250)
       {
         grip_timer = millis();
         grip_step = MOTOR_SLIDE;
+        stall_init = true; // reset buat siklus berikutnya
       }
     }
     else
@@ -1542,6 +1713,7 @@ void start_grip_sequence()
     }
 
     break;
+  }
 
   case MOTOR_SLIDE:
 
@@ -1577,6 +1749,7 @@ void start_grip_sequence()
     static bool sol_on_sent = false;
     if (!sol_on_sent)
     {
+      husky_detected = false; 
       sendSolenoidCommand(false); // suruh Bluepill: solenoidHolder HIGH
       sol_on_sent = true;
     }
@@ -1592,12 +1765,25 @@ void start_grip_sequence()
 
   case OPEN_SOL_HOLDER:
 
-    if (ir_button_a)
+    // if (ir_button_a)
+    // {
+
+    //   ir_button_a = false;
+    //   sendSolenoidCommand(true);
+    //   solenoid_triggered = true;
+    //   grip_timer = millis();
+    // }
+
+    // if (solenoid_triggered && millis() - grip_timer >= 300)
+    // {
+    //   solenoid_triggered = false;
+    //   grip_step = WAIT_GRIPPER_OPEN;
+    // }
+
+    if (husky_detected)
     {
-      // digitalWrite(solenoidHolder, LOW);
-      // ir_start = false;
-      ir_button_a = false;
-      sendSolenoidCommand(true);
+      husky_detected = false;    // consume sinyal, reset lagi jadi false
+      sendSolenoidCommand(true); // ini yang bikin solenoid LOW (sesuai fungsi sendSolenoidCommand kamu)
       solenoid_triggered = true;
       grip_timer = millis();
     }
@@ -1643,7 +1829,7 @@ void start_grip_sequence()
 
   case GRIPPER_CLOSE_2:
 
-    srv.write(62);
+    srv.write(61);
 
     static bool cmd_sent2 = false;
     if (!cmd_sent2)
@@ -1668,38 +1854,104 @@ void start_grip_sequence()
       // std_msgs__msg__Bool bool_msg;
       // bool_msg.data = true;
       // RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
-
     }
 
     break;
 
   case WAIT_MOTOR_HOMING2:
+  {
+    static unsigned long stateEnterTime = 0;
+    static bool stateJustEntered = true;
 
-    control_pos_lifter_front(1890, 200);
-    control_pos_lifter_behind(1890, 250);
-
-    if (abs(1890 - pos[6]) < 15 && abs(1890 - (-pos[7])) < 15)
+    if (stateJustEntered)
     {
-      // if (millis() - grip_timer >= 100)
-      // {
+      stateEnterTime = millis();
+      stateJustEntered = false;
+    }
+
+    control_pos_lifter_front(1960, 235);
+    control_pos_lifter_behind(1960, 250);
+
+    bool minTimeElapsed = (millis() - stateEnterTime) >= 500; // kasih waktu motor beneran mulai turun bareng
+
+    if (proxyState[0] && minTimeElapsed)
+    {
+      setMotor(MOTOR_LIFT_CW_BEHIND, MOTOR_LIFT_CCW_BEHIND, 0);
+    }
+
+    bool frontDone2 = abs(1960 - pos[6]) < 15;
+    bool behindDone2 = (proxyState[0] && minTimeElapsed) || (abs(1960 - (-pos[7])) < 15);
+
+    if (frontDone2 && behindDone2)
+    {
       grip_timer = millis();
 
       disable_tof_trigger = false;
       proxy_latched = false;
       lifter_triggered = false;
       grip_step = WAIT_SENSOR_READY;
-      // grip_step = GRIP_IDLE;
+      stateJustEntered = true; // reset biar siap dipakai lagi di siklus grip berikutnya
 
       std_msgs__msg__Bool bool_msg;
       bool_msg.data = true;
       RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
-      // }
     }
-    // else
-    // {
-    //   grip_timer = millis();
-    // }
     break;
+  }
+
+    // case WAIT_MOTOR_HOMING2:
+    // {
+    //   control_pos_lifter_front(1960, 200);
+    //   control_pos_lifter_behind(1960, 250);
+
+    //   if (proxyState[0])
+    //   {
+    //     setMotor(MOTOR_LIFT_CW_BEHIND, MOTOR_LIFT_CCW_BEHIND, 0);
+    //   }
+
+    //   bool frontDone2 = abs(1960 - pos[6]) < 15;
+    //   bool behindDone2 = proxyState[0] || (abs(1960 - (-pos[7])) < 15);
+
+    //   if (frontDone2 && behindDone2)
+    //   {
+    //     grip_timer = millis();
+
+    //     disable_tof_trigger = false;
+    //     proxy_latched = false;
+    //     lifter_triggered = false;
+    //     grip_step = WAIT_SENSOR_READY;
+
+    //     std_msgs__msg__Bool bool_msg;
+    //     bool_msg.data = true;
+    //     RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+    //   }
+    //   break;
+    // }
+
+    // case WAIT_MOTOR_HOMING2:
+
+    //   control_pos_lifter_front(1960, 200);
+    //   control_pos_lifter_behind(1960, 250);
+
+    //   if (abs(1960 - pos[6]) < 15 && abs(1960 - (-pos[7])) < 15)
+    //   {
+    //     // if (millis() - grip_timer >= 100)
+    //     // {
+    //     grip_timer = millis();
+
+    //     disable_tof_trigger = false;
+    //     proxy_latched = false;
+    //     lifter_triggered = false;
+    //     grip_step = WAIT_SENSOR_READY;
+    //     // grip_step = GRIP_IDLE;
+
+    //     std_msgs__msg__Bool bool_msg;
+    //     bool_msg.data = true;
+    //     RCSOFTCHECK(rcl_publish(&lifter_down2_publisher, &bool_msg, NULL));
+    //     // }
+    //   }
+
+    //   break;
 
     //   case LIFTER_DOWN_2:
 
@@ -1833,3 +2085,30 @@ void readEncoder()
     pos[i]--;
   }
 }
+
+// #include <Arduino.h>
+
+// void setup()
+// {
+//     pinMode(LED_BUILTIN, OUTPUT);
+
+//     Serial.begin(115200);
+//     Serial1.begin(57600);
+// }
+
+// void loop()
+// {
+//     if (Serial1.available())
+//     {
+//         uint8_t data = Serial1.read();
+
+//         if (data == 0x55)
+//         {
+//             Serial.println("Data diterima");
+
+//             digitalWrite(LED_BUILTIN, HIGH);
+//             delay(100);
+//             digitalWrite(LED_BUILTIN, LOW);
+//         }
+//     }
+// }
